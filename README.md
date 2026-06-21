@@ -28,39 +28,7 @@ Buffers PostgreSQL writes and shows real-time stats including queue latency, tot
 
 ## 🏗️ System Architecture
 
-```
-                                 ┌─────────────────────────────────┐
-                                 │         React Frontend          │
-                                 │    (Controlled Search Box)      │
-                                 └────────────────┬────────────────┘
-                                                  │
-                                                  │ HTTP GET/POST
-                                                  ▼
-                                 ┌─────────────────────────────────┐
-                                 │      Express.js Backend         │
-                                 │     (Stateless Servers)         │
-                                 └─────────┬──────────────┬────────┘
-                                            │              │
-                    GET /suggest (Reads)   │              │ POST /search (Writes)
-                                            ▼              ▼
-                    ┌──────────────────────────┐    ┌──────────────────────────┐
-                    │  Consistent Hash Router  │    │    Batch Write Queue     │
-                    └──────────────┬───────────┘    │       (In-Memory)        │
-                                   │                └──────────────┬───────────┘
-                                   │                               │
-                                   ▼                               ▼
-                    ┌──────────────────────────┐    ┌──────────────────────────┐
-                    │    Redis Cache Nodes     │    │       Batch Writer       │
-                    │  [Node A] [Node B] [NodeC]│    │  (Periodic DB flusher)   │
-                    └──────────────▲───────────┘    └──────────────┬───────────┘
-                                   │                               │
-                       Updates ZSET │                               │ Inserts / Updates
-                       scores       │                               ▼
-                    ┌──────────────┴───────────┐    ┌──────────────────────────┐
-                    │     Trending Service     │◄───┤    PostgreSQL Database   │
-                    │ (Cron: score computation)│    │       (Primary DB)       │
-                    └──────────────────────────┘    └──────────────────────────┘
-```
+![System Architecture Diagram](./screenshots/architecture_diagram.png)
 
 ### Component Breakdown
 1. **React Frontend**: Debounces input requests (`220ms`), displays suggestion lists showing matching prefixes, navigates options via keyboard, and provides administrative visualizers (Cache monitoring, ring trace).
