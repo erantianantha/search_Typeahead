@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: typeahead-db
+    environment:
+      POSTGRES_DB: typeahead
+      POSTGRES_USER: typeahead_user
+      POSTGRES_PASSWORD: typeahead_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U typeahead_user -d typeahead"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-a:
+    image: redis:7-alpine
+    container_name: redis-node-a
+    ports:
+      - "6379:6379"
+    command: redis-server --loglevel warning
+
+  redis-b:
+    image: redis:7-alpine
+    container_name: redis-node-b
+    ports:
+      - "6380:6379"
+    command: redis-server --loglevel warning
+
+  redis-c:
+    image: redis:7-alpine
+    container_name: redis-node-c
+    ports:
+      - "6381:6379"
+    command: redis-server --loglevel warning
+
+volumes:
+  pgdata:
