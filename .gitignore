@@ -43,6 +43,9 @@ Thumbs.db
 *.sln
 *.sw?
 
+# High-Level Design Document
+HLD_Search_Typeahead.md
+
 # Large Dataset CSVs (uncomment if you want to keep them out of git history)
 # *.csv
 # /search_queries.csv
