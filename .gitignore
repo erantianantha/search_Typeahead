@@ -45,6 +45,7 @@ Thumbs.db
 
 # High-Level Design Document
 HLD_Search_Typeahead.md
+project_report.md
 
 # Large Dataset CSVs (uncomment if you want to keep them out of git history)
 # *.csv

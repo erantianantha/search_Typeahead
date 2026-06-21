@@ -28,16 +28,80 @@ Buffers PostgreSQL writes and shows real-time stats including queue latency, tot
 
 ## 🏗️ System Architecture
 
+### 1. Architectural Blueprint
+The system is divided into three distinct operational layers designed for extreme write reduction and microsecond reads.
+
 ![System Architecture Diagram](./screenshots/architecture_diagram.png)
 
-### Component Breakdown
-1. **React Frontend**: Debounces input requests (`220ms`), displays suggestion lists showing matching prefixes, navigates options via keyboard, and provides administrative visualizers (Cache monitoring, ring trace).
-2. **Express Backend**: Hosts endpoints for fetching suggestions, submitting searches, and querying cluster nodes diagnostics.
-3. **Consistent Hash Router**: Hashes cache keys (`suggest:<prefix>`) using MD5 Ketama hash ring with `160 vnodes` per physical server to distribute keys evenly among the Redis nodes.
-4. **Redis Cache (3-node Cluster)**: Serves autocomplete lists with sub-10ms latency using Redis Sorted Sets (`ZSET`).
-5. **Trending Service**: Recomputes suggestion rankings every 5 minutes by blending total database hits and recent hourly activity (tracked via Redis sliding window):
-   $$\text{Score} = 0.7 \times \text{log\_normalized\_total} + 0.3 \times \text{normalized\_recency}$$
-6. **Batch Writer Queue**: Prevents PostgreSQL write saturation by collecting searches in a buffer, aggregating counters, and performing bulk upserts (`INSERT ... ON CONFLICT DO UPDATE`) every **10 seconds** or when the buffer hits **1000 queries**.
+### 2. High-Level Flow & Component Diagram
+Below is the interactive technical flowchart illustrating the network boundaries, ports, protocols, and data pathways for both read and write paths.
+
+```mermaid
+flowchart TB
+    %% Styling classes
+    classDef clientStyle fill:#111827,stroke:#06b6d4,stroke-width:2px,color:#f9fafb,font-weight:bold;
+    classDef serverStyle fill:#111827,stroke:#3b82f6,stroke-width:2px,color:#f9fafb,font-weight:bold;
+    classDef cacheStyle fill:#111827,stroke:#10b981,stroke-width:2px,color:#f9fafb,font-weight:bold;
+    classDef dbStyle fill:#111827,stroke:#f59e0b,stroke-width:2px,color:#f9fafb,font-weight:bold;
+
+    subgraph ClientZone ["🌐 Client Layer (Web Browser)"]
+        UI["React Search Component<br/>(Debounced input & 3-character threshold)"]:::clientStyle
+        RingVis["Consistent Hash Ring Visualizer<br/>(MD5 Ketama Node Lookup)"]:::clientStyle
+    end
+
+    subgraph AppZone ["⚙️ Application Layer (Node.js/Express Server)"]
+        API["Express Router & Controller"]:::serverStyle
+        HashRouter["Consistent Hashing Router<br/>(160 Virtual Nodes per physical node)"]:::serverStyle
+        BatchQueue["BatchWriter Queue Buffer<br/>(In-Memory array)"]:::serverStyle
+    end
+
+    subgraph CacheZone ["⚡ Distributed Cache Layer (Redis Cluster)"]
+        RedisA["[(Redis Node A)]<br/>Port 6379<br/>(ZSET: suggest:*)"]:::cacheStyle
+        RedisB["[(Redis Node B)]<br/>Port 6380<br/>(ZSET: suggest:*)"]:::cacheStyle
+        RedisC["[(Redis Node C)]<br/>Port 6381<br/>(ZSET: suggest:*)"]:::cacheStyle
+    end
+
+    subgraph StorageZone ["💾 Persistent Database & Analytics Layer"]
+        Postgres["[(PostgreSQL Database)]<br/>Port 5433<br/>(Index: idx_queries_text_score)"]:::dbStyle
+        TrendingService["Trending Cron Job<br/>(Calculates score every 5m)"]:::dbStyle
+    end
+
+    %% Read Path
+    UI -- "GET /suggest?q=prefix (min 3 chars)" --> API
+    API -- "1. Hashing Key suggest:prefix" --> HashRouter
+    HashRouter -- "2. Lookup Cache" --> RedisA
+    HashRouter -- "2. Lookup Cache" --> RedisB
+    HashRouter -- "2. Lookup Cache" --> RedisC
+
+    RedisA -.->|Cache HIT| API
+    RedisB -.->|Cache HIT| API
+    RedisC -.->|Cache HIT| API
+
+    API -- "3. Cache MISS (Fallback Select)" --> Postgres
+    Postgres -- "4. Return database results" --> API
+    API -- "5. Set cache (TTL = 300s)" --> HashRouter
+
+    %% Write Path
+    UI -- "POST /search {query}" --> API
+    API -- "Immediate 'Searched' 200 OK Response" --> UI
+    API -- "Enqueue update in memory" --> BatchQueue
+    BatchQueue -- "Bulk Upsert (every 10s or 1000 items)" --> Postgres
+    BatchQueue -- "Flush Invalidation (Delete suggest:prefix)" --> HashRouter
+
+    %% Analytics & Trending Path
+    TrendingService -- "1. Read total counts & hourly window" --> Postgres
+    TrendingService -- "2. Calculate formula score" --> Postgres
+    TrendingService -- "3. Write rankings back to cache nodes" --> HashRouter
+```
+
+### 3. Component Deep Dive
+1. **React Frontend**: Captures input queries, enforces a **3-character minimum** to avoid caching single/double character prefixes, triggers requests with a **220ms debounce**, handles navigation using keyboard arrows/Enter, and visualizes MD5 Ketama hash ring mappings dynamically.
+2. **Express Backend**: Hosts endpoints for fetching suggestions (`GET /suggest`), registering searches (`POST /search`), and exposing administrative diagnostics (/cache/status, /ring/trace).
+3. **Consistent Hash Router**: Uses a Ketama hashing implementation with **160 virtual nodes** per physical cache instance. This ensures query prefixes (`suggest:<prefix>`) are evenly distributed and minimizes cache keys displacement during scale events.
+4. **Redis Cache (3-node Cluster)**: Configured as individual nodes listening on ports `6379`, `6380`, and `6381`. It stores query prefix lists as Redis Sorted Sets (`ZSET`), allowing rapid autocomplete suggestion retrieval ranked by score.
+5. **Trending Service**: A node-cron scheduler executing every 5 minutes that fetches raw counts and hourly decay metrics from PostgreSQL, computes updated popularity-time scores, and populates physical Redis cluster nodes.
+6. **Batch Writer Queue**: Prevents PostgreSQL connection pool exhaustion by capturing write transactions in an in-memory buffer. It flushes batched upserts (`INSERT ... ON CONFLICT DO UPDATE`) every **10 seconds** or when the buffer size reaches **1000 items**, achieving up to a **99% write reduction**.
+7. **Cache Invalidation Handler**: On successful database flushes, the Batch Writer identifies the prefixes of all updated queries and explicitly deletes their `suggest:<prefix>` cache keys in Redis. This invalidates stale Negative Cache (`__empty__` sentinels) immediately, ensuring immediate availability of new searches.
 
 ---
 
